@@ -9,7 +9,7 @@ public class AssignCameraToPlayer : NetworkBehaviour
 
     public override void OnNetworkSpawn()
     {
-        if (!IsOwner) return; // Only the local player sets the camera
+        if (!IsOwner) return;
 
         if (cinemachineCamera == null)
         {
