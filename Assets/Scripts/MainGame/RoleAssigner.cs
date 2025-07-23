@@ -2,14 +2,20 @@ using Unity.Netcode;
 using UnityEngine;
 using System.Collections;
 using System.Linq;
+using UnityEngine.SceneManagement;
 
 public class RoleAssigner : NetworkBehaviour
 {
+    
     private void Start()
     {
-        if (IsServer)
+        string sceneName = SceneManager.GetActiveScene().name;
+        if(sceneName == "GameScene")
         {
-            StartCoroutine(AssignRolesWithDelay());
+            if (IsServer)
+            {
+                StartCoroutine(AssignRolesWithDelay());
+            }
         }
     }
 
@@ -29,12 +35,11 @@ public class RoleAssigner : NetworkBehaviour
 
         if (players.Count == 0) return;
 
-        // Pick exactly one random player to be the hider
         int hiderIndex = Random.Range(0, players.Count);
         for (int i = 0; i < players.Count; i++)
         {
             players[i].role.Value = (i == hiderIndex) ? PlayerRole.Hider : PlayerRole.Seeker;
+            Debug.Log($"Assigned {players[i].role.Value} to player {i} (OwnerId: {players[i].OwnerClientId})");
         }
-        // This guarantees exactly one hider, even if there are only two players
     }
 }

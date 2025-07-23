@@ -1,5 +1,6 @@
 using Unity.Netcode;
 using UnityEngine;
+using UnityEngine.SceneManagement;
 
 public class PlayerRoleManager : NetworkBehaviour
 {
@@ -7,9 +8,14 @@ public class PlayerRoleManager : NetworkBehaviour
 
     public override void OnNetworkSpawn()
     {
-        if (IsOwner)
+        string sceneName = SceneManager.GetActiveScene().name;
+
+        if (sceneName == "GameScene")
         {
-            Debug.Log("My role is: " + role.Value);
+            if (IsOwner)
+            {
+                Debug.Log("My role is: " + role.Value);
+            }
         }
     }
 }

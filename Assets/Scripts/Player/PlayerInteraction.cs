@@ -3,47 +3,53 @@ using UnityEngine.InputSystem;
 
 public class PlayerInteraction : MonoBehaviour
 {
-    private InputSystem_Actions inputActions;
-    private IInteractable currentInteractable;
+    private GameObject interactableObject;
 
-    void Awake()
+    private InputSystem_Actions inputActions;
+
+    private void Awake()
     {
         inputActions = new InputSystem_Actions();
+        inputActions.Player.Interact.performed += ctx => {
+            Debug.Log("E pressed - Interact performed");
+            Interact();
+        };
     }
 
-    void OnEnable()
+    private void OnEnable()
     {
-        inputActions.Player.Enable();
+        inputActions.Enable();
     }
 
-    void OnDisable()
+    private void OnDisable()
     {
-        inputActions.Player.Disable();
-    }
-
-    void Update()
-    {
-        if (inputActions.Player.Interact.WasPressedThisFrame() && currentInteractable != null)
-        {
-            currentInteractable.OnInteract();
-        }
+        inputActions.Disable();
     }
 
     private void OnTriggerEnter(Collider other)
     {
-        var interactable = other.GetComponent<IInteractable>();
-        if (interactable != null)
+        if (other.CompareTag("Interactable"))
         {
-            currentInteractable = interactable;
+            interactableObject = other.gameObject;
+            Debug.Log("Ready to interact with: " + interactableObject.name);
         }
     }
 
     private void OnTriggerExit(Collider other)
     {
-        var interactable = other.GetComponent<IInteractable>();
-        if (interactable != null && interactable == currentInteractable)
+        if (other.gameObject == interactableObject)
         {
-            currentInteractable = null;
+            interactableObject = null;
+            Debug.Log("Left interaction range.");
+        }
+    }
+
+    private void Interact()
+    {
+        if (interactableObject != null)
+        {
+            Debug.Log("Interacted with: " + interactableObject.name);
+            // Add your interaction logic here
         }
     }
 }
