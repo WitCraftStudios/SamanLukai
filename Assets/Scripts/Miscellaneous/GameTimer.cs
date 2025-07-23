@@ -1,191 +1,200 @@
 using UnityEngine;
 using TMPro;
 using System.Collections;
+using Unity.Netcode; // Required for networking
 
-public class GameTimer : MonoBehaviour
+public class GameTimer : NetworkBehaviour // Inherit from NetworkBehaviour
 {
+    // UI Elements (no changes)
     public TMP_Text timerText;
     public TMP_Text roundText;
     public TMP_Text phaseText;
-    public TMP_Text countdownText; // New: assign in Inspector for 3-2-1-Go
-
-    public int maxRounds = 5;
-    public float roundDuration = 60f; // 1 minute per round
-    public float hidingDuration = 30f; // 30 seconds for hiding
-
-    public CanvasGroup fadeCanvasGroup; // Assign in Inspector (should cover the screen)
+    public TMP_Text countdownText;
+    public CanvasGroup fadeCanvasGroup;
     public float fadeDuration = 1f;
 
-    private float timeLeft;
-    private int currentRound = 1;
-    private enum GamePhase { PreHiding, Hiding, Searching }
-    private GamePhase phase = GamePhase.PreHiding;
-    private bool isFading = false;
-    private bool gameOver = false;
+    // Game Settings (no changes)
+    public int maxRounds = 5;
+    public float roundDuration = 60f;
+    public float hidingDuration = 30f;
 
-    void Start()
+    // Networked variables to sync state across all clients
+    private readonly NetworkVariable<float> netTimeLeft = new NetworkVariable<float>(0f, NetworkVariableReadPermission.Everyone);
+    private readonly NetworkVariable<int> netCurrentRound = new NetworkVariable<int>(1, NetworkVariableReadPermission.Everyone);
+    private readonly NetworkVariable<GamePhase> netPhase = new NetworkVariable<GamePhase>(GamePhase.PreHiding, NetworkVariableReadPermission.Everyone);
+    private readonly NetworkVariable<bool> netGameOver = new NetworkVariable<bool>(false, NetworkVariableReadPermission.Everyone);
+
+    private enum GamePhase { PreHiding, Hiding, Searching }
+    private bool isFading = false; // Local state for UI
+
+    public override void OnNetworkSpawn()
     {
-        if (fadeCanvasGroup != null)
+        // Initial setup for UI elements
+        if (fadeCanvasGroup != null) fadeCanvasGroup.alpha = 0f;
+        if (countdownText != null) countdownText.gameObject.SetActive(false);
+
+        // Server starts the game loop
+        if (IsServer)
         {
-            fadeCanvasGroup.alpha = 0f;
-            fadeCanvasGroup.blocksRaycasts = false;
+            StartCoroutine(PreHidingCountdown());
         }
-        if (countdownText != null)
-        {
-            countdownText.gameObject.SetActive(false);
-        }
-        StartCoroutine(PreHidingCountdown());
     }
 
     void Update()
     {
-        if (isFading || phase == GamePhase.PreHiding || gameOver) return;
+        // All clients update their UI based on networked variables
+        UpdateUI();
 
-        if (timeLeft > 0)
+        // Server is the only one who runs the game logic
+        if (!IsServer || isFading || netGameOver.Value) return;
+
+        if (netTimeLeft.Value > 0)
         {
-            timeLeft -= Time.deltaTime;
-            UpdateUI();
+            netTimeLeft.Value -= Time.deltaTime;
         }
-        else
+        else // Timer reached zero, change the phase
         {
-            if (phase == GamePhase.Hiding)
+            if (netPhase.Value == GamePhase.Hiding)
             {
-                StartCoroutine(FadeAndThen(StartSearchingPhase));
+                // Transition to Searching
+                StartNextPhaseServerRpc(GamePhase.Searching);
             }
-            else if (phase == GamePhase.Searching)
+            else if (netPhase.Value == GamePhase.Searching)
             {
-                if (currentRound < maxRounds)
+                if (netCurrentRound.Value < maxRounds)
                 {
-                    StartCoroutine(FadeAndThen(StartNextHidingPhase));
+                    // Transition to next Hiding phase
+                    StartNextPhaseServerRpc(GamePhase.Hiding);
                 }
                 else
                 {
-                    // Game over logic here
-                    phaseText.text = "Game Over!";
-                    timerText.text = "00:00";
-                    gameOver = true; // Prevent further updates
-                    StartCoroutine(FadeAndThen(null));
+                    // Game Over
+                    netGameOver.Value = true;
                 }
             }
         }
     }
-
-    IEnumerator PreHidingCountdown()
+    
+    [ServerRpc(RequireOwnership = false)]
+    private void StartNextPhaseServerRpc(GamePhase nextPhase)
     {
-        phase = GamePhase.PreHiding;
-        if (phaseText != null)
+        netPhase.Value = nextPhase;
+
+        if (nextPhase == GamePhase.Hiding)
         {
-            phaseText.gameObject.SetActive(true);
-            phaseText.text = "Get Ready!";
-            phaseText.alpha = 1f;
+            netCurrentRound.Value++;
+            netTimeLeft.Value = hidingDuration;
         }
-        if (timerText != null) timerText.text = "";
-        if (roundText != null) roundText.text = "";
+        else if (nextPhase == GamePhase.Searching)
+        {
+            netTimeLeft.Value = roundDuration;
+        }
+
+        // Tell all clients to fade and update their text
+        StartPhaseClientRpc(nextPhase, netCurrentRound.Value);
+    }
+
+    [ClientRpc]
+    private void StartPhaseClientRpc(GamePhase newPhase, int round)
+    {
+        StartCoroutine(FadeAndPreparePhase(newPhase, round));
+    }
+    
+    private IEnumerator PreHidingCountdown()
+    {
+        // This coroutine now runs on the server and tells clients what to display
+        TriggerCountdownClientRpc("Get Ready!", 1f);
+        yield return new WaitForSeconds(1f);
+
+        for (int i = 3; i > 0; i--)
+        {
+            TriggerCountdownClientRpc(i.ToString(), 1f);
+            yield return new WaitForSeconds(1f);
+        }
+
+        TriggerCountdownClientRpc("Go!", 1f);
+        yield return new WaitForSeconds(1f);
+
+        TriggerCountdownClientRpc("", 0f); // Clear the countdown text
+        
+        // Start the first phase
+        StartNextPhaseServerRpc(GamePhase.Hiding);
+    }
+    
+    [ClientRpc]
+    private void TriggerCountdownClientRpc(string text, float waitTime)
+    {
+        StartCoroutine(ShowCountdownText(text));
+    }
+
+    private IEnumerator ShowCountdownText(string text)
+    {
         if (countdownText != null)
         {
             countdownText.gameObject.SetActive(true);
-            countdownText.text = "";
+            countdownText.text = text;
+            if (string.IsNullOrEmpty(text))
+            {
+                countdownText.gameObject.SetActive(false);
+            }
         }
-        yield return new WaitForSeconds(1f);
-        for (int i = 3; i > 0; i--)
-        {
-            if (countdownText != null) countdownText.text = i.ToString();
-            yield return new WaitForSeconds(1f);
-        }
-        if (countdownText != null) countdownText.text = "Go!";
-        yield return new WaitForSeconds(1f);
-        if (countdownText != null) countdownText.gameObject.SetActive(false);
-        StartHidingPhase();
+        yield return null;
     }
 
-    void StartHidingPhase()
-    {
-        phase = GamePhase.Hiding;
-        timeLeft = hidingDuration;
-        if (phaseText != null)
-        {
-            phaseText.text = "Hiding Phase";
-            phaseText.alpha = 1f;
-            phaseText.gameObject.SetActive(true);
-            StartCoroutine(FadeOutPhaseTextAfterDelay(5f));
-        }
-        roundText.text = "Round " +  currentRound;
-        UpdateUI();
-        // TODO: Select random hider, etc.
-    }
-
-    void StartSearchingPhase()
-    {
-        phase = GamePhase.Searching;
-        timeLeft = roundDuration;
-        if (phaseText != null)
-        {
-            phaseText.text = "Searching Phase";
-            phaseText.alpha = 1f;
-            phaseText.gameObject.SetActive(true);
-            StartCoroutine(FadeOutPhaseTextAfterDelay(5f));
-        }
-        // roundText.text = "Round " + currentRound;
-        UpdateUI();
-        // TODO: Move players to spawn, fade in, etc.
-    }
-
-    void StartNextHidingPhase()
-    {
-        phase = GamePhase.Hiding;
-        currentRound++; // Increment round at the start of hiding phase
-        if (currentRound > maxRounds)
-        {
-            // Game over logic here
-            phaseText.text = "Game Over!";
-            timerText.text = "00:00";
-            gameOver = true; // Prevent further updates
-            StartCoroutine(FadeAndThen(null));
-            return;
-        }
-        timeLeft = hidingDuration;
-        if (phaseText != null)
-        {
-            phaseText.text = "Hiding Phase";
-            phaseText.alpha = 1f;
-            phaseText.gameObject.SetActive(true);
-            StartCoroutine(FadeOutPhaseTextAfterDelay(5f));
-        }
-        roundText.text = "Round " + currentRound;
-        UpdateUI();
-        // TODO: Select next random hider, etc.
-    }
-
-    void UpdateUI()
-    {
-        int minutes = Mathf.FloorToInt(timeLeft / 60f);
-        int seconds = Mathf.FloorToInt(timeLeft % 60f);
-        if (timerText != null)
-            timerText.text = string.Format("{0:00}:{1:00}", minutes, seconds);
-    }
-
-    IEnumerator FadeAndThen(System.Action nextPhaseAction)
+    private IEnumerator FadeAndPreparePhase(GamePhase newPhase, int round)
     {
         isFading = true;
-        // Fade out
-        if (fadeCanvasGroup != null)
-        {
-            yield return StartCoroutine(Fade(0f, 1f));
-            fadeCanvasGroup.blocksRaycasts = true;
-        }
-        // Wait a moment while faded out
-        yield return new WaitForSeconds(1f);
-        // Next phase
-        if (nextPhaseAction != null)
-            nextPhaseAction();
-        // Fade in
-        if (fadeCanvasGroup != null)
-        {
-            yield return StartCoroutine(Fade(1f, 0f));
-            fadeCanvasGroup.blocksRaycasts = false;
-        }
+        if (fadeCanvasGroup != null) yield return StartCoroutine(Fade(0f, 1f));
+
+        // Update UI text for the new phase
+        UpdatePhaseTextUI(newPhase, round);
+        
+        if (fadeCanvasGroup != null) yield return StartCoroutine(Fade(1f, 0f));
         isFading = false;
     }
+    
+    private void UpdatePhaseTextUI(GamePhase phase, int round)
+    {
+        string phaseString = "";
+        switch (phase)
+        {
+            case GamePhase.Hiding:
+                phaseString = "Hiding Phase";
+                break;
+            case GamePhase.Searching:
+                phaseString = "Searching Phase";
+                break;
+        }
+
+        if (phaseText != null)
+        {
+            phaseText.text = phaseString;
+            phaseText.alpha = 1f;
+            phaseText.gameObject.SetActive(true);
+            StartCoroutine(FadeOutPhaseTextAfterDelay(5f));
+        }
+
+        if (roundText != null)
+        {
+            roundText.text = "Round " + round;
+        }
+    }
+
+    private void UpdateUI()
+    {
+        // Reads from NetworkVariable
+        int minutes = Mathf.FloorToInt(netTimeLeft.Value / 60f);
+        int seconds = Mathf.FloorToInt(netTimeLeft.Value % 60f);
+        if (timerText != null)
+            timerText.text = string.Format("{0:00}:{1:00}", minutes, seconds);
+
+        if(netGameOver.Value && phaseText != null)
+        {
+            phaseText.text = "Game Over!";
+        }
+    }
+
+    // --- UI Coroutines (no changes) ---
 
     IEnumerator Fade(float from, float to)
     {
