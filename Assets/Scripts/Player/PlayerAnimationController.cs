@@ -14,6 +14,7 @@ public class PlayerAnimationController : NetworkBehaviour
     void Awake()
     {
         animator = GetComponent<Animator>();
+        
     }
 
     void Update()

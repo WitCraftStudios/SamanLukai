@@ -1,11 +1,12 @@
-using UnityEngine;
+﻿using UnityEngine;
 using TMPro;
 using System.Collections;
-using Unity.Netcode; // Required for networking
+using System.Linq;
+using Unity.Netcode;
 
-public class GameTimer : NetworkBehaviour // Inherit from NetworkBehaviour
+public class GameTimer : NetworkBehaviour
 {
-    // UI Elements (no changes)
+    [Header("UI Elements")]
     public TMP_Text timerText;
     public TMP_Text roundText;
     public TMP_Text phaseText;
@@ -13,27 +14,39 @@ public class GameTimer : NetworkBehaviour // Inherit from NetworkBehaviour
     public CanvasGroup fadeCanvasGroup;
     public float fadeDuration = 1f;
 
-    // Game Settings (no changes)
+    [Header("Game Settings")]
     public int maxRounds = 5;
     public float roundDuration = 60f;
     public float hidingDuration = 30f;
 
-    // Networked variables to sync state across all clients
+    [Header("References")]
+    public MeetingVote meetingVote;       // Assign in inspector
+    public GameObject meetingPanel;       // Optional: just to show/hide
+    public ScoreboardUI scoreboardUI;     // Assign your scoreboard UI prefab/object
+
     private readonly NetworkVariable<float> netTimeLeft = new NetworkVariable<float>(0f, NetworkVariableReadPermission.Everyone);
-    private readonly NetworkVariable<int> netCurrentRound = new NetworkVariable<int>(1, NetworkVariableReadPermission.Everyone);
+    private readonly NetworkVariable<int> netCurrentRound = new NetworkVariable<int>(0, NetworkVariableReadPermission.Everyone);
     private readonly NetworkVariable<GamePhase> netPhase = new NetworkVariable<GamePhase>(GamePhase.PreHiding, NetworkVariableReadPermission.Everyone);
     private readonly NetworkVariable<bool> netGameOver = new NetworkVariable<bool>(false, NetworkVariableReadPermission.Everyone);
 
+    private PointManager pointManager;
+    private bool isFading = false;
+    private bool meetingInProgress = false;
+    private bool meetingEnded = false;
+    private bool objectFound = false;
+
+    private ulong currentHiderClientId;
+    private ulong currentSeekerClientId;
+
     private enum GamePhase { PreHiding, Hiding, Searching }
-    private bool isFading = false; // Local state for UI
 
     public override void OnNetworkSpawn()
     {
-        // Initial setup for UI elements
+        pointManager = FindObjectOfType<PointManager>();
+
         if (fadeCanvasGroup != null) fadeCanvasGroup.alpha = 0f;
         if (countdownText != null) countdownText.gameObject.SetActive(false);
 
-        // Server starts the game loop
         if (IsServer)
         {
             StartCoroutine(PreHidingCountdown());
@@ -42,39 +55,114 @@ public class GameTimer : NetworkBehaviour // Inherit from NetworkBehaviour
 
     void Update()
     {
-        // All clients update their UI based on networked variables
         UpdateUI();
 
-        // Server is the only one who runs the game logic
         if (!IsServer || isFading || netGameOver.Value) return;
 
         if (netTimeLeft.Value > 0)
         {
             netTimeLeft.Value -= Time.deltaTime;
         }
-        else // Timer reached zero, change the phase
+        else
         {
-            if (netPhase.Value == GamePhase.Hiding)
+            HandlePhaseEnd();
+        }
+    }
+
+    private void HandlePhaseEnd()
+    {
+        if (netPhase.Value == GamePhase.Hiding)
+        {
+            StartNextPhaseServerRpc(GamePhase.Searching);
+        }
+        else if (netPhase.Value == GamePhase.Searching)
+        {
+            if (netCurrentRound.Value < maxRounds)
             {
-                // Transition to Searching
-                StartNextPhaseServerRpc(GamePhase.Searching);
-            }
-            else if (netPhase.Value == GamePhase.Searching)
-            {
-                if (netCurrentRound.Value < maxRounds)
+                if (!meetingInProgress && !meetingEnded)
                 {
-                    // Transition to next Hiding phase
-                    StartNextPhaseServerRpc(GamePhase.Hiding);
+                    meetingInProgress = true;
+                    StartCoroutine(WaitForMeetingThenNextRound());
                 }
-                else
+            }
+            else
+            {
+                // Game over
+                netGameOver.Value = true;
+
+                // Show scoreboard for all players
+                if (IsServer && scoreboardUI != null && pointManager != null)
                 {
-                    // Game Over
-                    netGameOver.Value = true;
+                    scoreboardUI.ShowScoreboard(pointManager.GetAllScores());
+                    ShowScoreboardClientRpc();
                 }
             }
         }
     }
-    
+
+    [ServerRpc(RequireOwnership = false)]
+    public void NotifyObjectFoundServerRpc(ulong seekerClientId, ulong hiderClientId)
+    {
+        if (objectFound) return; // already found
+        objectFound = true;
+        Debug.Log($"Object found by seeker {seekerClientId}!");
+        EndMeeting(objectFound, hiderClientId, seekerClientId);
+    }
+
+    private IEnumerator WaitForMeetingThenNextRound()
+    {
+        yield return new WaitUntil(() => !isFading);
+
+        if (meetingPanel != null)
+            meetingPanel.SetActive(true);
+
+        currentHiderClientId = PickRandomHider();
+        currentSeekerClientId = PickRandomSeeker(currentHiderClientId);
+
+        ulong[] allPlayers = NetworkManager.Singleton.ConnectedClients.Keys.ToArray();
+
+        if (meetingVote != null)
+        {
+            meetingVote.StartMeetingServerRpc(currentHiderClientId, currentSeekerClientId, allPlayers);
+        }
+
+        // Wait until meeting ends
+        yield return new WaitUntil(() => !meetingInProgress);
+
+        // Start next round
+        StartNextPhaseServerRpc(GamePhase.Hiding);
+    }
+
+    private ulong PickRandomHider()
+    {
+        var allClients = NetworkManager.Singleton.ConnectedClients.Keys.ToList();
+        if (allClients.Count == 0) return 0;
+        return allClients[Random.Range(0, allClients.Count)];
+    }
+
+    private ulong PickRandomSeeker(ulong hiderId)
+    {
+        var allClients = NetworkManager.Singleton.ConnectedClients.Keys.Where(id => id != hiderId).ToList();
+        if (allClients.Count == 0) return hiderId; // fallback
+        return allClients[Random.Range(0, allClients.Count)];
+    }
+
+    public void EndMeeting(bool objectFound, ulong hiderClientId, ulong seekerClientId)
+    {
+        if (IsServer && pointManager != null)
+        {
+            pointManager.AwardRoundPointsServerRpc(objectFound, hiderClientId, seekerClientId);
+            pointManager.AwardRoundPointsServerRpc(objectFound, hiderClientId, seekerClientId);
+        }
+
+        if (meetingPanel != null)
+            meetingPanel.SetActive(false);
+
+        meetingInProgress = false;
+        meetingEnded = true;
+        Debug.Log($"✅ Meeting ended — ObjectFound: {objectFound}");
+    }
+
     [ServerRpc(RequireOwnership = false)]
     private void StartNextPhaseServerRpc(GamePhase nextPhase)
     {
@@ -84,13 +172,16 @@ public class GameTimer : NetworkBehaviour // Inherit from NetworkBehaviour
         {
             netCurrentRound.Value++;
             netTimeLeft.Value = hidingDuration;
+
+            meetingInProgress = false;
+            meetingEnded = false;
+            objectFound = false;
         }
         else if (nextPhase == GamePhase.Searching)
         {
             netTimeLeft.Value = roundDuration;
         }
 
-        // Tell all clients to fade and update their text
         StartPhaseClientRpc(nextPhase, netCurrentRound.Value);
     }
 
@@ -99,10 +190,9 @@ public class GameTimer : NetworkBehaviour // Inherit from NetworkBehaviour
     {
         StartCoroutine(FadeAndPreparePhase(newPhase, round));
     }
-    
+
     private IEnumerator PreHidingCountdown()
     {
-        // This coroutine now runs on the server and tells clients what to display
         TriggerCountdownClientRpc("Get Ready!", 1f);
         yield return new WaitForSeconds(1f);
 
@@ -115,12 +205,10 @@ public class GameTimer : NetworkBehaviour // Inherit from NetworkBehaviour
         TriggerCountdownClientRpc("Go!", 1f);
         yield return new WaitForSeconds(1f);
 
-        TriggerCountdownClientRpc("", 0f); // Clear the countdown text
-        
-        // Start the first phase
+        TriggerCountdownClientRpc("", 0f);
         StartNextPhaseServerRpc(GamePhase.Hiding);
     }
-    
+
     [ClientRpc]
     private void TriggerCountdownClientRpc(string text, float waitTime)
     {
@@ -131,12 +219,8 @@ public class GameTimer : NetworkBehaviour // Inherit from NetworkBehaviour
     {
         if (countdownText != null)
         {
-            countdownText.gameObject.SetActive(true);
+            countdownText.gameObject.SetActive(!string.IsNullOrEmpty(text));
             countdownText.text = text;
-            if (string.IsNullOrEmpty(text))
-            {
-                countdownText.gameObject.SetActive(false);
-            }
         }
         yield return null;
     }
@@ -146,25 +230,15 @@ public class GameTimer : NetworkBehaviour // Inherit from NetworkBehaviour
         isFading = true;
         if (fadeCanvasGroup != null) yield return StartCoroutine(Fade(0f, 1f));
 
-        // Update UI text for the new phase
         UpdatePhaseTextUI(newPhase, round);
-        
+
         if (fadeCanvasGroup != null) yield return StartCoroutine(Fade(1f, 0f));
         isFading = false;
     }
-    
+
     private void UpdatePhaseTextUI(GamePhase phase, int round)
     {
-        string phaseString = "";
-        switch (phase)
-        {
-            case GamePhase.Hiding:
-                phaseString = "Hiding Phase";
-                break;
-            case GamePhase.Searching:
-                phaseString = "Searching Phase";
-                break;
-        }
+        string phaseString = phase == GamePhase.Hiding ? "Hiding Phase" : "Searching Phase";
 
         if (phaseText != null)
         {
@@ -182,19 +256,16 @@ public class GameTimer : NetworkBehaviour // Inherit from NetworkBehaviour
 
     private void UpdateUI()
     {
-        // Reads from NetworkVariable
         int minutes = Mathf.FloorToInt(netTimeLeft.Value / 60f);
         int seconds = Mathf.FloorToInt(netTimeLeft.Value % 60f);
         if (timerText != null)
             timerText.text = string.Format("{0:00}:{1:00}", minutes, seconds);
 
-        if(netGameOver.Value && phaseText != null)
+        if (netGameOver.Value && phaseText != null)
         {
             phaseText.text = "Game Over!";
         }
     }
-
-    // --- UI Coroutines (no changes) ---
 
     IEnumerator Fade(float from, float to)
     {
@@ -229,6 +300,15 @@ public class GameTimer : NetworkBehaviour // Inherit from NetworkBehaviour
             phaseText.alpha = 0f;
             phaseText.gameObject.SetActive(false);
             phaseText.color = originalColor;
+        }
+    }
+
+    [ClientRpc]
+    private void ShowScoreboardClientRpc()
+    {
+        if (scoreboardUI != null && pointManager != null)
+        {
+            scoreboardUI.ShowScoreboard(pointManager.GetAllScores());
         }
     }
 }
