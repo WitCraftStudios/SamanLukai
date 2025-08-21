@@ -2,9 +2,9 @@ using UnityEngine;
 
 public class Door : MonoBehaviour, IInteractable
 {
-    public void OnInteract()
+    public void Interact(PlayerInteraction player)
     {
-        Debug.Log("Door opened!");
-        // Add your door opening logic here
+        Debug.Log(player.name + " opened the door!");
+        // Add door open animation or logic here
     }
 }
